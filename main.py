@@ -479,7 +479,7 @@ async def klik_tombol(chat, teks):
                         button_text = (button.text or "").strip().lower()
                         print(f"DEBUG BUTTON: {button.text}")
                         if teks.lower() in button_text:
-                            await asyncio.sleep(random.uniform(0.6, 1.2))
+                            await asyncio.sleep(random.uniform(0.2, 0.5))
                             print(f"✅ KLIK → {button.text} (Attempt {attempt})")
                             await msg.click(row_index, col_index)
                             await asyncio.sleep(2.2)

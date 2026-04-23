@@ -339,7 +339,12 @@ async def smart_forward_qris(event, user_id):
                         settings_data.get("bayar_text", default_settings()["bayar_text"]),
                         event
                     )
+
+                    kurs = settings_data.get("kurs", 0)
+                    bayar_text += f"\n\n💱 Estimasi kurs:\n1 MYR ≈ {kurs} IDR"
+
                     await event.reply(bayar_text)
+                    
 
                     user_states[user_id] = "waiting_payment"
                     user_last_event[user_id] = event

@@ -946,22 +946,27 @@ extra_harga = ""
 
 if kurs > 0 and total_harga_idr > 0:
     total_harga_myr = total_harga_idr / kurs
-    extra_harga = f"\n\nEstimasi harga:\nRp{total_harga_idr:,}".replace(",", ".") + f"\nRM{total_harga_myr:.2f}"
+    rupiah_text = f"Rp{total_harga_idr:,}".replace(",", ".")
+    extra_harga = f"💰 Detail harga:\n{rupiah_text}\nRM{total_harga_myr:.2f}"
 
-await event.reply(f"""🛒 Konfirmasi Pesanan
+# Cek apakah extra_harga ada, jika ada, tambahkan newline
+if extra_harga:
+    extra_harga = f"{extra_harga}\n\n"
+else:
+    extra_harga = ""
 
-Halo kak, kamu memilih:
-**{nama_paket}**
+konfirmasi_text = (
+    "🛒 Konfirmasi Pesanan\n\n"
+    f"Halo kak, kamu memilih:\n"
+    f"**{nama_paket}**\n\n"
+    f"{extra_harga}"
+    "Kalau sudah sesuai, balas:\n"
+    "**ya** — untuk lanjut proses\n"
+    "**tidak** — untuk batal\n\n"
+    "⏳ Konfirmasi berlaku selama 5 jam."
+)
 
-{extra_harga}
-
-Kalau sudah sesuai, balas:
-**ya** — untuk lanjut proses
-**tidak** — untuk batal
-
-⏳ Konfirmasi berlaku selama 5 jam.
-""")
-
+await event.reply(konfirmasi_text)
 # ================== AUTO RECONNECT ==================
 async def main():
     timeout_task = None

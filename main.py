@@ -245,13 +245,11 @@ def is_qris_message(msg) -> bool:
 
 
 def is_affirmative(text: str) -> bool:
-    text = normalize_text(text)
-    return text in CONFIRM_YES_WORDS
+    return normalize_text(text) in CONFIRM_YES_WORDS
 
 
 def is_negative(text: str) -> bool:
-    text = normalize_text(text)
-    return text in CONFIRM_NO_WORDS
+    return normalize_text(text) in CONFIRM_NO_WORDS
 
 
 async def render_template(text: str, event) -> str:
@@ -653,13 +651,16 @@ async def forward_bukti_transfer(event):
 
 async def route_payment_bot_message(event):
     settings_data = await get_settings()
-
     text = event.message.text or ""
 
     if not is_join_message(text):
         return
 
+    print("DEBUG JOIN TEXT:", text[:300])
+
     payment_id = extract_payment_id(text)
+    print("DEBUG JOIN PAYMENT ID:", payment_id)
+
     target_user_id = None
 
     if payment_id:
@@ -672,7 +673,7 @@ async def route_payment_bot_message(event):
         if len(waiting_users) == 1:
             target_user_id = waiting_users[0]
         else:
-            print("⚠️ Pesan join dari payment bot ambigu, lebih dari satu user waiting_payment dan payment_id tidak ditemukan.")
+            print("⚠️ Pesan join ambigu, lebih dari satu user waiting_payment dan payment_id tidak ditemukan.")
             return
 
     if target_user_id not in user_last_event:
@@ -898,7 +899,9 @@ async def help_handler(event):
         "• `.stats` - Cek jumlah database user\n"
         "• `.history` - Cek 10 riwayat terakhir\n"
         "• `.cleardb` - Kosongkan riwayat\n"
-        "• `.order [nama paket]` - Fallback manual order\n\n"
+        "• `.order [nama paket]` - Fallback manual order\n"
+        "• `.sendjoin` - Kirim manual link join ke user waiting_payment tunggal\n"
+        "• `.sendjoinid [user_id]` - Kirim manual link join ke user tertentu\n\n"
         "**Keyword customer:** `harga`\n"
         "**Konfirmasi order customer:** `ya / iya / jadi / lanjut / oke` atau `tidak / tak / batal / gajadi / cancel`\n"
         f"**Timeout konfirmasi:** {format_timeout_text(CONFIRM_TIMEOUT_MINUTES)}\n"
@@ -984,6 +987,121 @@ async def setharga_handler(event):
     except Exception as error:
         print(f"Error simpan foto harga: {error}")
         await event.reply("❌ Gagal menyimpan foto list harga.")
+
+# ================== COMMAND MANUAL SEND JOIN ==================
+@client.on(events.NewMessage(pattern=r"(?i)^[.]sendjoin$"))
+async def sendjoin_handler(event):
+    if not event.out:
+        return
+
+    if not event.is_reply:
+        await event.reply("❌ Reply ke pesan link join dengan `.sendjoin`")
+        return
+
+    replied_message = await event.get_reply_message()
+    if not replied_message:
+        await event.reply("❌ Pesan reply tidak ditemukan.")
+        return
+
+    waiting_users = await get_waiting_payment_user_ids()
+
+    if not waiting_users:
+        await event.reply("❌ Tidak ada user yang sedang menunggu pembayaran.")
+        return
+
+    if len(waiting_users) > 1:
+        await event.reply(
+            "❌ Ada lebih dari satu user yang sedang menunggu pembayaran.\n"
+            "Gunakan `.sendjoinid USER_ID` agar tidak salah kirim."
+        )
+        return
+
+    target_user_id = waiting_users[0]
+
+    try:
+        if replied_message.media:
+            await client.send_file(
+                target_user_id,
+                replied_message.media,
+                caption=replied_message.text or ""
+            )
+        else:
+            await client.send_message(target_user_id, replied_message.text or "")
+
+        if target_user_id in user_last_event:
+            target_event = user_last_event[target_user_id]
+            settings_data = await get_settings()
+            thanks_text = await render_template(
+                settings_data.get("thanks_text", default_settings()["thanks_text"]),
+                target_event
+            )
+            await target_event.reply(thanks_text)
+
+        state = user_states.get(target_user_id, {})
+        payment_id_state = state.get("payment_id")
+        if payment_id_state:
+            await set_payment_status(payment_id_state, "completed")
+
+        user_states.pop(target_user_id, None)
+        user_last_event.pop(target_user_id, None)
+
+        await event.reply(f"✅ Link join berhasil dikirim ke user: `{target_user_id}`")
+
+    except Exception as error:
+        await event.reply(f"❌ Gagal kirim link join manual: {error}")
+
+
+@client.on(events.NewMessage(pattern=r"(?i)^[.]sendjoinid\s+(\d+)$"))
+async def sendjoinid_handler(event):
+    if not event.out:
+        return
+
+    if not event.is_reply:
+        await event.reply("❌ Reply ke pesan link join dengan `.sendjoinid USER_ID`")
+        return
+
+    replied_message = await event.get_reply_message()
+    if not replied_message:
+        await event.reply("❌ Pesan reply tidak ditemukan.")
+        return
+
+    target_user_id = int(event.pattern_match.group(1))
+
+    state = user_states.get(target_user_id, {})
+    if state.get("status") != "waiting_payment":
+        await event.reply("❌ User ini tidak sedang dalam status waiting_payment.")
+        return
+
+    try:
+        if replied_message.media:
+            await client.send_file(
+                target_user_id,
+                replied_message.media,
+                caption=replied_message.text or ""
+            )
+        else:
+            await client.send_message(target_user_id, replied_message.text or "")
+
+        if target_user_id in user_last_event:
+            target_event = user_last_event[target_user_id]
+            settings_data = await get_settings()
+            thanks_text = await render_template(
+                settings_data.get("thanks_text", default_settings()["thanks_text"]),
+                target_event
+            )
+            await target_event.reply(thanks_text)
+
+        payment_id_state = state.get("payment_id")
+        if payment_id_state:
+            await set_payment_status(payment_id_state, "completed")
+
+        user_states.pop(target_user_id, None)
+        user_last_event.pop(target_user_id, None)
+
+        await event.reply(f"✅ Link join berhasil dikirim ke user: `{target_user_id}`")
+
+    except Exception as error:
+        await event.reply(f"❌ Gagal kirim link join manual: {error}")
 
 # ================== COMMAND STATS ==================
 @client.on(events.NewMessage(pattern=r"(?i)^[.]stats$"))
@@ -1199,11 +1317,18 @@ async def private_message_handler(event):
         sender = None
         sender_username = ""
 
+    # pesan dari bot payment utama
     if sender_username == PAYMENT_BOT.lower():
         await route_payment_bot_message(event)
         return
 
-    text = normalize_text(event.message.text)
+    # fallback: kalau ada link telegram di chat private, coba route juga
+    text_raw = event.message.text or ""
+    if "t.me/" in text_raw:
+        await route_payment_bot_message(event)
+        return
+
+    text = normalize_text(text_raw)
     sender_id = event.sender_id
 
     if not text:
@@ -1244,6 +1369,13 @@ async def private_message_handler(event):
                 await event.reply("❌ Pesanan dibatalkan.")
 
             await delete_pending_confirmation(sender_id)
+            return
+
+    # kalau user lagi waiting payment lalu kirim kata-kata konfirmasi lagi
+    state = user_states.get(sender_id, {})
+    if state.get("status") == "waiting_payment":
+        if is_affirmative(text):
+            await event.reply("⏳ Pembayaran kamu sedang diproses ya kak, mohon tunggu sebentar 🙏")
             return
 
     if text.startswith(".") or text.startswith("/"):

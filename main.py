@@ -213,7 +213,6 @@ def is_qris_message(msg) -> bool:
     text = msg.text or ""
     text_lower = normalize_text(text)
 
-    # payment id sangat kuat jadi prioritas
     if extract_payment_id(text):
         return True
 
@@ -519,7 +518,6 @@ async def smart_forward_qris(event, user_id, min_message_id=0):
                 amount_text = extract_payment_amount(text)
                 expiry_text = extract_payment_expiry(text)
 
-                # kalau sudah ada payment record untuk id yang sama, skip
                 if payment_id:
                     existing = await get_payment_record(payment_id)
                     if existing:
@@ -594,7 +592,6 @@ async def route_payment_bot_message(event):
 
     text = event.message.text or ""
 
-    # hanya fokus ke pesan join / link
     if not is_join_message(text):
         return
 
@@ -609,10 +606,6 @@ async def route_payment_bot_message(event):
 
     if target_user_id is None:
         waiting_users = await get_waiting_payment_user_ids()
-
-        # fallback aman:
-        # kalau cuma satu user waiting payment, kirim ke dia
-        # kalau lebih dari satu, jangan kirim ke siapa-siapa agar tidak salah
         if len(waiting_users) == 1:
             target_user_id = waiting_users[0]
         else:
@@ -652,7 +645,21 @@ async def proses_order_otomatis_core(event, sender, sender_id, selected_pakets):
     menu_awal = "Paket Hemat" if is_paket_hemat else "VIP SATUAN"
     total_harga_idr = hitung_total_harga_idr(selected_pakets)
 
+    state = user_states.get(sender_id, {})
+    queue_message_id = state.get("queue_message_id")
+
+    if queue_message_id:
+        try:
+            await client.edit_message(
+                event.chat_id,
+                queue_message_id,
+                "⚡ Pesanan kamu sedang diproses..."
+            )
+        except Exception as error:
+            print(f"Error edit queue message: {error}")
+
     user_states[sender_id] = {
+        **state,
         "status": "processing_order",
         "selected_pakets": selected_pakets,
         "total_harga_idr": total_harga_idr,
@@ -749,10 +756,21 @@ async def enqueue_order(event, sender, sender_id, selected_pakets):
     if current_checkout_user_id is not None:
         posisi += 1
 
+    queue_message = None
+
     if posisi <= 1:
-        await event.reply("✅ Pesanan kamu masuk antrian dan akan segera diproses.")
+        queue_message = await event.reply("✅ Pesanan kamu masuk antrian dan akan segera diproses.")
     else:
-        await event.reply(f"✅ Pesanan kamu masuk antrian.\nPosisi antrian saat ini: **{posisi}**")
+        queue_message = await event.reply(
+            f"✅ Pesanan kamu masuk antrian.\nPosisi antrian saat ini: **{posisi}**"
+        )
+
+    state = user_states.get(sender_id, {})
+    state["queue_message_id"] = queue_message.id if queue_message else None
+    state["selected_pakets"] = selected_pakets
+    state["total_harga_idr"] = hitung_total_harga_idr(selected_pakets)
+    state["status"] = state.get("status", "queued")
+    user_states[sender_id] = state
 
 # ================== TIMEOUT CHECKER ==================
 async def check_expired_orders():
@@ -1118,7 +1136,6 @@ async def private_message_handler(event):
         sender = None
         sender_username = ""
 
-    # pesan dari bot payment
     if sender_username == PAYMENT_BOT.lower():
         await route_payment_bot_message(event)
         return
@@ -1129,7 +1146,6 @@ async def private_message_handler(event):
     if not text:
         return
 
-    # keyword lihat harga
     if text == "harga":
         caption_text = await render_template(
             settings_data.get("text_harga", default_settings()["text_harga"]),
@@ -1146,7 +1162,6 @@ async def private_message_handler(event):
         await event.reply(caption_text)
         return
 
-    # kalau sedang pending konfirmasi
     pending = await get_pending_confirmation(sender_id)
     if pending:
         if text == "ya":
@@ -1168,7 +1183,6 @@ async def private_message_handler(event):
             await delete_pending_confirmation(sender_id)
             return
 
-    # cegah command owner masuk flow customer
     if text.startswith(".") or text.startswith("/"):
         return
 

@@ -68,11 +68,11 @@ current_checkout_user_id = None
 
 # ================== DELAY ==================
 DELAYS = {
-    "START": 1.0,
-    "MENU_AWAL": 0.4,
-    "PAKET": 0.3,
-    "GABUNG": 1.0,
-    "WAIT_QRIS": 1.5
+    "START": 1.5,
+    "MENU_AWAL": 0.6,
+    "PAKET": 0.5,
+    "GABUNG": 1.5,
+    "WAIT_QRIS": 2.0
 }
 
 # ================== PAKET MAPPING ==================
@@ -93,8 +93,8 @@ PAKET_MAPPING = {
 
 # ================== HARGA PAKET ==================
 PAKET_PRICES = {
-    "VVIP SUPER INDO": 100000,
-    "VVIP SUPER MALAY": 150000,
+    "VVIP SUPER INDO": 150000,
+    "VVIP SUPER MALAY": 100000,
     "HIJAB PREMIUM": 60000,
     "INDO PREMIUM": 50000,
     "ASIAN DAIRY": 45000,
@@ -104,7 +104,7 @@ PAKET_PRICES = {
     "BARATT": 45000,
     "ONLY FANS": 50000,
     "SMP / SMA PREMIUM": 60000,
-    "Payment": 1000
+    "Payment": 100000
 }
 
 # ================== UTIL ==================
@@ -487,7 +487,7 @@ async def klik_tombol(chat, teks):
             await asyncio.sleep(0.6)
         except Exception as error:
             print(f"Error klik '{teks}': {error}")
-            await asyncio.sleep(1.6)
+            await asyncio.sleep(0.6)
 
     print(f"❌ GAGAL menemukan tombol: '{teks}'")
     return False
@@ -506,24 +506,56 @@ async def smart_forward_qris(event, user_id, min_message_id=0):
     for _ in range(10):
         try:
             messages = await client.get_messages(PAYMENT_BOT, limit=30)
+
+            qris_photo_msg = None
+            qris_info_msg = None
+
             for msg in messages:
                 if min_message_id and msg.id <= min_message_id:
                     continue
 
-                if not is_qris_message(msg):
-                    continue
-
                 text = msg.text or ""
+                text_lower = normalize_text(text)
+
+                if msg.photo:
+                    qris_photo_msg = msg
+                    break
+
+                if extract_payment_id(text) or any(
+                    keyword in text_lower
+                    for keyword in ["qris", "scan", "pembayaran", "id pembayaran", "harga", "berlaku sampai"]
+                ):
+                    if qris_info_msg is None:
+                        qris_info_msg = msg
+
+            if qris_photo_msg:
+                text = qris_photo_msg.text or ""
                 payment_id = extract_payment_id(text)
                 amount_text = extract_payment_amount(text)
                 expiry_text = extract_payment_expiry(text)
 
+                if (not payment_id) and qris_info_msg:
+                    info_text = qris_info_msg.text or ""
+                    payment_id = extract_payment_id(info_text)
+                    amount_text = amount_text or extract_payment_amount(info_text)
+                    expiry_text = expiry_text or extract_payment_expiry(info_text)
+
                 if payment_id:
                     existing = await get_payment_record(payment_id)
                     if existing:
+                        print(f"⚠️ Payment ID {payment_id} sudah ada, skip QRIS lama")
+                        await asyncio.sleep(1.0)
                         continue
 
-                await msg.forward_to(event.chat_id)
+                # forward QR dulu
+                await qris_photo_msg.forward_to(event.chat_id)
+
+                # forward info kalau ada dan beda msg
+                if qris_info_msg and qris_info_msg.id != qris_photo_msg.id:
+                    try:
+                        await qris_info_msg.forward_to(event.chat_id)
+                    except Exception as info_error:
+                        print(f"Error forward qris info: {info_error}")
 
                 if payment_id:
                     await create_or_update_payment_record(
@@ -533,7 +565,7 @@ async def smart_forward_qris(event, user_id, min_message_id=0):
                         total_harga_idr=total_harga_idr,
                         amount_text=amount_text,
                         expiry_text=expiry_text,
-                        source_message_id=msg.id
+                        source_message_id=qris_photo_msg.id
                     )
 
                 bayar_text = await render_template(
@@ -549,6 +581,7 @@ async def smart_forward_qris(event, user_id, min_message_id=0):
                 if payment_id:
                     bayar_text += f"\n\n🧾 ID Transaksi:\n`{payment_id}`"
 
+                # baru kirim teks setelah forward sukses
                 await event.reply(bayar_text)
 
                 state["status"] = "waiting_payment"
@@ -564,7 +597,10 @@ async def smart_forward_qris(event, user_id, min_message_id=0):
 
         await asyncio.sleep(1.0)
 
-    await event.reply("✅ Proses selesai. Silakan cek QRIS di bot pembayaran.")
+    await event.reply(
+        "⚠️ QRIS belum berhasil kami ambil otomatis.\n"
+        "Mohon tunggu sebentar atau ulangi order ya kak."
+    )
     return False
 
 
@@ -596,7 +632,6 @@ async def route_payment_bot_message(event):
         return
 
     payment_id = extract_payment_id(text)
-
     target_user_id = None
 
     if payment_id:
@@ -666,7 +701,7 @@ async def proses_order_otomatis_core(event, sender, sender_id, selected_pakets):
         "payment_id": None
     }
 
-    print("DEBUG MENU AWAL:", menu_awal)
+    print("DEBUG MENU AWAL:", menu_awAL if False else menu_awal)
 
     if is_paket_hemat:
         await event.reply(f"⚡ Memproses **{total_selected} paket** via **Paket Hemat**...")

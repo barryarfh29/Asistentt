@@ -1386,6 +1386,7 @@ async def first_chat_send_harga_handler(event):
         "last_seen": now,
         "auto_harga_sent": old_data.get("auto_harga_sent", False) if old_data else False
     }
+
     await upsert_user(event.sender_id, payload)
 
     if old_data and old_data.get("auto_harga_sent", False):
@@ -1405,9 +1406,6 @@ async def first_chat_send_harga_handler(event):
         payload["auto_harga_sent"] = True
         payload["last_seen"] = now
         await upsert_user(event.sender_id, payload)
-
-        first_chat_skip_messages.add(event.id)
-        print(f"✅ Auto harga terkirim sekali ke user {user_id}")
 
     except Exception as error:
         print(f"Error kirim harga first chat: {error}")
@@ -1562,7 +1560,6 @@ async def private_message_handler(event):
 
     sent_message = await event.reply(konfirmasi_text)
     await create_pending_confirmation(sender_id, selected_pakets, sent_message.id)
-
 
 # ================== MAIN ==================
 async def main():

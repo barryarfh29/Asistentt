@@ -88,13 +88,12 @@ PAKET_MAPPING = {
     "BARATT": ["baratt", "barat"],
     "ONLY FANS": ["only fans", "onlyfans"],
     "SMP / SMA PREMIUM": ["smp", "sma"],
-    "Payment": ["payment"]
 }
 
 # ================== HARGA PAKET ==================
 PAKET_PRICES = {
-    "VVIP SUPER INDO": 150000,
-    "VVIP SUPER MALAY": 100000,
+    "VVIP SUPER INDO": 100000,
+    "VVIP SUPER MALAY": 150000,
     "HIJAB PREMIUM": 60000,
     "INDO PREMIUM": 50000,
     "ASIAN DAIRY": 45000,
@@ -104,7 +103,6 @@ PAKET_PRICES = {
     "BARATT": 45000,
     "ONLY FANS": 50000,
     "SMP / SMA PREMIUM": 60000,
-    "Payment": 100000
 }
 
 # ================== CONFIRMATION WORDS ==================

@@ -68,11 +68,12 @@ current_checkout_user_id = None
 
 # ================== DELAY ==================
 DELAYS = {
-    "START": 3.0,
-    "MENU_AWAL": 1.2,
-    "PAKET": 1.0,
-    "GABUNG": 3.0,
-    "WAIT_QRIS": 5.0
+    DELAYS = {
+    "START": 1.0,
+    "MENU_AWAL": 0.4,
+    "PAKET": 0.3,
+    "GABUNG": 1.0,
+    "WAIT_QRIS": 1.5
 }
 
 # ================== PAKET MAPPING ==================

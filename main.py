@@ -517,7 +517,7 @@ async def help_handler(event):
 
 
 # ================== COMMAND SETTINGS ==================
-@client.on(events.NewMessage(pattern=r"(?i)^[.]setkurs\s+(\d+)$"))
+@client.on(events.NewMessage(pattern=r"(?i)^[.]setkurs\s+([\d\.]+)$"
 async def setkurs_handler(event):
     if not event.out:
         return

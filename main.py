@@ -2,7 +2,7 @@ import asyncio
 import os
 import random
 import re
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta
 
 from dotenv import load_dotenv
 from motor.motor_asyncio import AsyncIOMotorClient
@@ -107,7 +107,7 @@ PAKET_PRICES = {
 
 # ================== UTIL ==================
 def now_utc():
-    return datetime.now(timezone.utc)
+    return datetime.utcnow()
 
 
 def normalize_text(text: str) -> str:
@@ -535,6 +535,10 @@ async def check_expired_orders():
                 if not user_id or not expired_at:
                     continue
 
+                # normalisasi kalau Mongo kembalikan aware datetime
+                if getattr(expired_at, "tzinfo", None) is not None:
+                    expired_at = expired_at.replace(tzinfo=None)
+
                 if now >= expired_at:
                     try:
                         await client.send_message(
@@ -827,7 +831,6 @@ async def first_chat_send_harga_handler(event):
         payload["last_seen"] = now
         await upsert_user(event.sender_id, payload)
 
-        # tandai supaya message ini tidak diproses lagi di handler bawah
         first_chat_skip_messages.add(event.id)
 
         print(f"✅ Auto harga terkirim sekali ke user {user_id}")
@@ -873,7 +876,6 @@ async def private_message_handler(event):
         sender = None
         sender_username = ""
 
-    # pesan dari payment bot
     if sender_username == PAYMENT_BOT.lower():
         await forward_link_join(event)
         return
@@ -884,7 +886,7 @@ async def private_message_handler(event):
     if not text:
         return
 
-    # keyword lihat harga manual
+    # keyword lihat harga
     if text == "harga":
         caption_text = await render_template(
             settings_data.get("text_harga", default_settings()["text_harga"]),
@@ -901,7 +903,7 @@ async def private_message_handler(event):
         await event.reply(caption_text)
         return
 
-    # kalau sedang pending konfirmasi
+    # pending konfirmasi
     pending = await get_pending_confirmation(sender_id)
     if pending:
         if text == "ya":
@@ -916,7 +918,7 @@ async def private_message_handler(event):
             await event.reply("❌ Oke, pesanan dibatalkan.")
             return
 
-    # cegah command owner masuk flow customer
+    # cegah command owner ikut masuk
     if text.startswith(".") or text.startswith("/"):
         return
 

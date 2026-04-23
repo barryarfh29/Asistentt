@@ -107,6 +107,16 @@ PAKET_PRICES = {
     "Payment": 100000
 }
 
+# ================== CONFIRMATION WORDS ==================
+CONFIRM_YES_WORDS = {
+    "ya", "y", "iya", "iy", "ok", "oke", "lanjut", "jadi", "jadi ya", "gas", "yes"
+}
+
+CONFIRM_NO_WORDS = {
+    "tidak", "tak", "gak", "ga", "enggak", "nggak", "batal",
+    "gajadi", "ga jadi", "gak jadi", "tak jadi", "cancel", "no"
+}
+
 # ================== UTIL ==================
 def now_utc():
     return datetime.utcnow()
@@ -221,6 +231,16 @@ def is_qris_message(msg) -> bool:
         return any(keyword in text_lower for keyword in qr_keywords)
 
     return False
+
+
+def is_affirmative(text: str) -> bool:
+    text = normalize_text(text)
+    return text in CONFIRM_YES_WORDS
+
+
+def is_negative(text: str) -> bool:
+    text = normalize_text(text)
+    return text in CONFIRM_NO_WORDS
 
 
 async def render_template(text: str, event) -> str:
@@ -547,10 +567,8 @@ async def smart_forward_qris(event, user_id, min_message_id=0):
                         await asyncio.sleep(1.0)
                         continue
 
-                # forward QR dulu
                 await qris_photo_msg.forward_to(event.chat_id)
 
-                # forward info kalau ada dan beda msg
                 if qris_info_msg and qris_info_msg.id != qris_photo_msg.id:
                     try:
                         await qris_info_msg.forward_to(event.chat_id)
@@ -581,7 +599,6 @@ async def smart_forward_qris(event, user_id, min_message_id=0):
                 if payment_id:
                     bayar_text += f"\n\n🧾 ID Transaksi:\n`{payment_id}`"
 
-                # baru kirim teks setelah forward sukses
                 await event.reply(bayar_text)
 
                 state["status"] = "waiting_payment"
@@ -701,7 +718,7 @@ async def proses_order_otomatis_core(event, sender, sender_id, selected_pakets):
         "payment_id": None
     }
 
-    print("DEBUG MENU AWAL:", menu_awAL if False else menu_awal)
+    print("DEBUG MENU AWAL:", menu_awal)
 
     if is_paket_hemat:
         await event.reply(f"⚡ Memproses **{total_selected} paket** via **Paket Hemat**...")
@@ -872,7 +889,7 @@ async def help_handler(event):
         "• `.cleardb` - Kosongkan riwayat\n"
         "• `.order [nama paket]` - Fallback manual order\n\n"
         "**Keyword customer:** `harga`\n"
-        "**Konfirmasi order customer:** `ya` / `tidak`\n"
+        "**Konfirmasi order customer:** `ya / iya / jadi / lanjut / oke` atau `tidak / tak / batal / gajadi / cancel`\n"
         f"**Timeout konfirmasi:** {format_timeout_text(CONFIRM_TIMEOUT_MINUTES)}\n"
         "**Variabel:** `{mention}`, `{name}`, `{id}`"
     )
@@ -1198,25 +1215,25 @@ async def private_message_handler(event):
         return
 
     pending = await get_pending_confirmation(sender_id)
-if pending:
-    if text in ["ya", "y", "iya", "lanjut", "ok", "oke"]:
-        selected_pakets = pending.get("pakets", [])
-        await delete_pending_confirmation(sender_id)
-        await enqueue_order(event, sender, sender_id, selected_pakets)
-        return
+    if pending:
+        if is_affirmative(text):
+            selected_pakets = pending.get("pakets", [])
+            await delete_pending_confirmation(sender_id)
+            await enqueue_order(event, sender, sender_id, selected_pakets)
+            return
 
-    if text in ["tidak", "batal", "cancel", "gak jadi", "ga jadi", "enggak", "nggak", "no"]:
-        try:
-            message_id = pending.get("message_id")
-            if message_id:
-                await client.edit_message(sender_id, message_id, "❌ Pesanan dibatalkan.")
-            else:
+        if is_negative(text):
+            try:
+                message_id = pending.get("message_id")
+                if message_id:
+                    await client.edit_message(sender_id, message_id, "❌ Pesanan dibatalkan.")
+                else:
+                    await event.reply("❌ Pesanan dibatalkan.")
+            except Exception:
                 await event.reply("❌ Pesanan dibatalkan.")
-        except Exception:
-            await event.reply("❌ Pesanan dibatalkan.")
 
-        await delete_pending_confirmation(sender_id)
-        return
+            await delete_pending_confirmation(sender_id)
+            return
 
     if text.startswith(".") or text.startswith("/"):
         return
@@ -1256,9 +1273,9 @@ if pending:
         f"Halo kak, kamu memilih:\n"
         f"**{nama_paket}**\n\n"
         f"{extra_harga}"
-        "Kalau sudah sesuai, balas:\n"
-        "**ya** — untuk lanjut proses\n"
-        "**tidak** — untuk batal\n\n"
+        "Kalau sudah sesuai, balas salah satu:\n"
+        "**ya / iya / jadi / lanjut / oke** — untuk lanjut proses\n"
+        "**tidak / tak / batal / gajadi / cancel** — untuk batal\n\n"
         f"⏳ Konfirmasi berlaku selama {format_timeout_text(CONFIRM_TIMEOUT_MINUTES)}."
     )
 

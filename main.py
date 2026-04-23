@@ -961,8 +961,6 @@ Kalau sudah sesuai, balas:
 
 ⏳ Konfirmasi berlaku selama 5 jam.
 """)
-)
-
 
 # ================== AUTO RECONNECT ==================
 async def main():

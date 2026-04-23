@@ -20,7 +20,6 @@ PAYMENT_BOT = os.getenv("PAYMENT_BOT", "WarungLENDIR_Robot")
 MONGO_URI = os.getenv("MONGO_URI")
 MONGO_DB_NAME = os.getenv("MONGO_DB_NAME", "warung_lendir_bot")
 
-# timeout konfirmasi dalam menit
 # default 300 menit = 5 jam
 CONFIRM_TIMEOUT_MINUTES = int(os.getenv("CONFIRM_TIMEOUT_MINUTES", "300"))
 
@@ -52,25 +51,20 @@ users_col = db["users"]
 settings_col = db["settings"]
 history_col = db["history"]
 pending_col = db["pending_confirmations"]
+payments_col = db["payments"]
 
 # ================== FILES ==================
 HARGA_IMAGE_FILE = "harga_list.jpg"
 
 # ================== RUNTIME STATE ==================
-# user_states[user_id] = {
-#   "status": "waiting_payment" / "processing_order",
-#   "selected_pakets": [...],
-#   "total_harga_idr": 100000
-# }
 user_states = {}
 user_last_event = {}
-
-# mencegah first chat diproses dua kali
 first_chat_skip_messages = set()
 
-# user yang sedang aktif di sesi payment bot
-# ini penting supaya link join / thanks tidak nyasar ke pembeli sebelumnya
-active_payment_user_id = None
+# queue checkout
+order_queue = asyncio.Queue()
+queued_user_ids = set()
+current_checkout_user_id = None
 
 # ================== DELAY ==================
 DELAYS = {
@@ -169,6 +163,65 @@ def parse_requested_packages(raw_input: str):
             selected_pakets.append(matched)
 
     return selected_pakets, None
+
+
+def extract_payment_id(text: str) -> str | None:
+    if not text:
+        return None
+
+    patterns = [
+        r"id\s*pembayaran\s*[:\-]?\s*([A-Za-z0-9_\-]+)",
+        r"id\s*payment\s*[:\-]?\s*([A-Za-z0-9_\-]+)",
+    ]
+
+    for pattern in patterns:
+        match = re.search(pattern, text, flags=re.IGNORECASE)
+        if match:
+            return match.group(1).strip()
+
+    return None
+
+
+def extract_payment_amount(text: str) -> str | None:
+    if not text:
+        return None
+
+    match = re.search(r"harga\s*[:\-]?\s*(.+)", text, flags=re.IGNORECASE)
+    if match:
+        return match.group(1).strip()
+
+    return None
+
+
+def extract_payment_expiry(text: str) -> str | None:
+    if not text:
+        return None
+
+    match = re.search(r"berlaku\s*sampai\s*[:\-]?\s*(.+)", text, flags=re.IGNORECASE)
+    if match:
+        return match.group(1).strip()
+
+    return None
+
+
+def is_join_message(text: str) -> bool:
+    text_lower = normalize_text(text)
+    return ("join payment" in text_lower) or ("t.me/" in text_lower)
+
+
+def is_qris_message(msg) -> bool:
+    text = msg.text or ""
+    text_lower = normalize_text(text)
+
+    # payment id sangat kuat jadi prioritas
+    if extract_payment_id(text):
+        return True
+
+    if msg.photo:
+        qr_keywords = ["qr", "scan", "qris", "bayar", "pembayaran", "silakan scan"]
+        return any(keyword in text_lower for keyword in qr_keywords)
+
+    return False
 
 
 async def render_template(text: str, event) -> str:
@@ -341,6 +394,56 @@ async def delete_pending_confirmation(user_id: int):
 async def count_pending_confirmations():
     return await pending_col.count_documents({})
 
+# ================== PAYMENTS ==================
+async def create_or_update_payment_record(
+    payment_id: str,
+    user_id: int,
+    selected_pakets: list[str],
+    total_harga_idr: int,
+    amount_text: str | None = None,
+    expiry_text: str | None = None,
+    source_message_id: int | None = None,
+):
+    await payments_col.update_one(
+        {"_id": payment_id},
+        {
+            "$set": {
+                "user_id": user_id,
+                "selected_pakets": selected_pakets,
+                "total_harga_idr": total_harga_idr,
+                "amount_text": amount_text,
+                "expiry_text": expiry_text,
+                "status": "waiting_payment",
+                "updated_at": now_utc(),
+                "source_message_id": source_message_id,
+            },
+            "$setOnInsert": {
+                "created_at": now_utc(),
+            }
+        },
+        upsert=True
+    )
+
+
+async def get_payment_record(payment_id: str):
+    return await payments_col.find_one({"_id": payment_id})
+
+
+async def set_payment_status(payment_id: str, status: str):
+    await payments_col.update_one(
+        {"_id": payment_id},
+        {"$set": {"status": status, "updated_at": now_utc()}},
+        upsert=False
+    )
+
+
+async def get_waiting_payment_user_ids():
+    waiting_users = []
+    for uid, state in user_states.items():
+        if state.get("status") == "waiting_payment":
+            waiting_users.append(uid)
+    return waiting_users
+
 # ================== PAYMENT FLOW ==================
 async def mulai_flow_payment():
     try:
@@ -351,6 +454,16 @@ async def mulai_flow_payment():
     except Exception as error:
         print(f"Error kirim /start ke payment bot: {error}")
         return False
+
+
+async def get_latest_payment_bot_message_id():
+    try:
+        messages = await client.get_messages(PAYMENT_BOT, limit=1)
+        if messages:
+            return messages[0].id
+    except Exception as error:
+        print(f"Error get_latest_payment_bot_message_id: {error}")
+    return 0
 
 
 async def klik_tombol(chat, teks):
@@ -381,57 +494,73 @@ async def klik_tombol(chat, teks):
     return False
 
 
-def is_payment_session_busy() -> bool:
-    global active_payment_user_id
-
-    if active_payment_user_id is None:
-        return False
-
-    state = user_states.get(active_payment_user_id, {})
-    return state.get("status") in {"processing_order", "waiting_payment"}
-
-
-async def smart_forward_qris(event, user_id):
-    global active_payment_user_id
-
+async def smart_forward_qris(event, user_id, min_message_id=0):
     settings_data = await get_settings()
 
     print("⏳ Menunggu QRIS muncul...")
     await asyncio.sleep(DELAYS["WAIT_QRIS"])
 
+    state = user_states.get(user_id, {})
+    selected_pakets = state.get("selected_pakets", [])
+    total_harga_idr = state.get("total_harga_idr", 0)
+
     for _ in range(10):
         try:
             messages = await client.get_messages(PAYMENT_BOT, limit=30)
             for msg in messages:
-                text_lower = normalize_text(msg.text)
-                if msg.photo or any(keyword in text_lower for keyword in ["qr", "scan", "qris", "bayar", "pembayaran", "silakan scan"]):
-                    await msg.forward_to(event.chat_id)
+                if min_message_id and msg.id <= min_message_id:
+                    continue
 
-                    bayar_text = await render_template(
-                        settings_data.get("bayar_text", default_settings()["bayar_text"]),
-                        event
+                if not is_qris_message(msg):
+                    continue
+
+                text = msg.text or ""
+                payment_id = extract_payment_id(text)
+                amount_text = extract_payment_amount(text)
+                expiry_text = extract_payment_expiry(text)
+
+                # kalau sudah ada payment record untuk id yang sama, skip
+                if payment_id:
+                    existing = await get_payment_record(payment_id)
+                    if existing:
+                        continue
+
+                await msg.forward_to(event.chat_id)
+
+                if payment_id:
+                    await create_or_update_payment_record(
+                        payment_id=payment_id,
+                        user_id=user_id,
+                        selected_pakets=selected_pakets,
+                        total_harga_idr=total_harga_idr,
+                        amount_text=amount_text,
+                        expiry_text=expiry_text,
+                        source_message_id=msg.id
                     )
 
-                    kurs = settings_data.get("kurs", 0)
-                    state = user_states.get(user_id, {})
-                    total_harga_idr = state.get("total_harga_idr", 0)
+                bayar_text = await render_template(
+                    settings_data.get("bayar_text", default_settings()["bayar_text"]),
+                    event
+                )
 
-                    if kurs > 0 and total_harga_idr > 0:
-                        total_harga_myr = total_harga_idr / kurs
-                        bayar_text += f"\n\n💱 Estimasi harga:\nRM{total_harga_myr:.2f}"
+                kurs = settings_data.get("kurs", 0)
+                if kurs > 0 and total_harga_idr > 0:
+                    total_harga_myr = total_harga_idr / kurs
+                    bayar_text += f"\n\n💱 Estimasi harga:\nRM{total_harga_myr:.2f}"
 
-                    await event.reply(bayar_text)
+                if payment_id:
+                    bayar_text += f"\n\n🧾 ID Transaksi:\n`{payment_id}`"
 
-                    existing = user_states.get(user_id, {})
-                    existing["status"] = "waiting_payment"
-                    user_states[user_id] = existing
-                    user_last_event[user_id] = event
+                await event.reply(bayar_text)
 
-                    # tetapkan hanya user ini yang aktif untuk sesi payment saat ini
-                    active_payment_user_id = user_id
+                state["status"] = "waiting_payment"
+                state["payment_id"] = payment_id
+                user_states[user_id] = state
+                user_last_event[user_id] = event
 
-                    print("✅ QRIS berhasil diforward!")
-                    return True
+                print("✅ QRIS berhasil diforward!")
+                return True
+
         except Exception as error:
             print(f"Error cek QRIS: {error}")
 
@@ -442,18 +571,11 @@ async def smart_forward_qris(event, user_id):
 
 
 async def forward_bukti_transfer(event):
-    global active_payment_user_id
-
     settings_data = await get_settings()
 
     user_id = event.sender_id
     state = user_states.get(user_id, {})
-
-    # bukti transfer hanya diproses untuk user yang memang aktif di sesi payment saat ini
     if state.get("status") != "waiting_payment":
-        return
-
-    if active_payment_user_id != user_id:
         return
 
     try:
@@ -467,28 +589,38 @@ async def forward_bukti_transfer(event):
         print(f"Error forward bukti: {error}")
 
 
-async def forward_link_join(event):
-    global active_payment_user_id
-
+async def route_payment_bot_message(event):
     settings_data = await get_settings()
 
     text = event.message.text or ""
-    text_lower = text.lower()
 
-    if "join payment" not in text_lower and "t.me/" not in text_lower:
+    # hanya fokus ke pesan join / link
+    if not is_join_message(text):
         return
 
-    # hanya kirim ke user yang sedang aktif saat ini
-    if active_payment_user_id is None:
-        return
+    payment_id = extract_payment_id(text)
 
-    target_user_id = active_payment_user_id
-    state = user_states.get(target_user_id, {})
+    target_user_id = None
 
-    if state.get("status") != "waiting_payment":
-        return
+    if payment_id:
+        record = await get_payment_record(payment_id)
+        if record:
+            target_user_id = record.get("user_id")
+
+    if target_user_id is None:
+        waiting_users = await get_waiting_payment_user_ids()
+
+        # fallback aman:
+        # kalau cuma satu user waiting payment, kirim ke dia
+        # kalau lebih dari satu, jangan kirim ke siapa-siapa agar tidak salah
+        if len(waiting_users) == 1:
+            target_user_id = waiting_users[0]
+        else:
+            print("⚠️ Pesan join dari payment bot ambigu, lebih dari satu user waiting_payment dan payment_id tidak ditemukan.")
+            return
 
     if target_user_id not in user_last_event:
+        print(f"⚠️ user_last_event tidak ditemukan untuk user {target_user_id}")
         return
 
     try:
@@ -501,25 +633,20 @@ async def forward_link_join(event):
         )
         await target_event.reply(thanks_text)
 
+        state = user_states.get(target_user_id, {})
+        payment_id_state = state.get("payment_id")
+
+        if payment_id_state:
+            await set_payment_status(payment_id_state, "completed")
+
         user_states.pop(target_user_id, None)
         user_last_event.pop(target_user_id, None)
-        active_payment_user_id = None
 
     except Exception as error:
-        print(f"Error forward link join: {error}")
+        print(f"Error route_payment_bot_message: {error}")
 
 
-async def proses_order_otomatis(event, sender, sender_id, selected_pakets):
-    global active_payment_user_id
-
-    # kalau ada sesi payment aktif milik orang lain, tahan dulu
-    if is_payment_session_busy() and active_payment_user_id != sender_id:
-        await event.reply(
-            "⏳ Saat ini sistem sedang menyelesaikan pembayaran customer lain.\n"
-            "Mohon tunggu sebentar lalu kirim ulang order ya kak."
-        )
-        return
-
+async def proses_order_otomatis_core(event, sender, sender_id, selected_pakets):
     total_selected = len(selected_pakets)
     is_paket_hemat = total_selected >= 2
     menu_awal = "Paket Hemat" if is_paket_hemat else "VIP SATUAN"
@@ -528,11 +655,9 @@ async def proses_order_otomatis(event, sender, sender_id, selected_pakets):
     user_states[sender_id] = {
         "status": "processing_order",
         "selected_pakets": selected_pakets,
-        "total_harga_idr": total_harga_idr
+        "total_harga_idr": total_harga_idr,
+        "payment_id": None
     }
-
-    # lock sesi payment untuk user ini
-    active_payment_user_id = sender_id
 
     print("DEBUG MENU AWAL:", menu_awal)
 
@@ -542,19 +667,17 @@ async def proses_order_otomatis(event, sender, sender_id, selected_pakets):
         await event.reply(f"⚡ Memproses **{selected_pakets[0]}** via **VIP Satuan**...")
 
     try:
+        last_bot_msg_id = await get_latest_payment_bot_message_id()
+
         started = await mulai_flow_payment()
         if not started:
             user_states.pop(sender_id, None)
-            if active_payment_user_id == sender_id:
-                active_payment_user_id = None
             await event.reply("❌ Gagal memulai bot payment.")
             return
 
         menu_found = await klik_tombol(PAYMENT_BOT, menu_awal)
         if not menu_found:
             user_states.pop(sender_id, None)
-            if active_payment_user_id == sender_id:
-                active_payment_user_id = None
             await event.reply(f"❌ Menu '{menu_awal}' tidak ditemukan di bot payment.")
             return
 
@@ -565,8 +688,6 @@ async def proses_order_otomatis(event, sender, sender_id, selected_pakets):
             paket_found = await klik_tombol(PAYMENT_BOT, paket)
             if not paket_found:
                 user_states.pop(sender_id, None)
-                if active_payment_user_id == sender_id:
-                    active_payment_user_id = None
                 await event.reply(f"❌ Paket '{paket}' tidak ditemukan.")
                 return
             await asyncio.sleep(DELAYS["PAKET"])
@@ -575,23 +696,63 @@ async def proses_order_otomatis(event, sender, sender_id, selected_pakets):
         gabung_found = await klik_tombol(PAYMENT_BOT, "Gabung Sekarang")
         if not gabung_found:
             user_states.pop(sender_id, None)
-            if active_payment_user_id == sender_id:
-                active_payment_user_id = None
             await event.reply("❌ Tombol 'Gabung Sekarang' tidak ditemukan.")
             return
 
         await asyncio.sleep(DELAYS["GABUNG"])
-        await smart_forward_qris(event, sender_id)
+        qris_ok = await smart_forward_qris(event, sender_id, min_message_id=last_bot_msg_id)
+
+        if not qris_ok:
+            user_states.pop(sender_id, None)
+            return
 
         username = getattr(sender, "username", None) or "Unknown"
         await save_history(sender_id, username, selected_pakets)
 
     except Exception as error:
-        print(f"❌ Error proses: {error}")
+        print(f"❌ Error proses_order_otomatis_core: {error}")
         user_states.pop(sender_id, None)
-        if active_payment_user_id == sender_id:
-            active_payment_user_id = None
         await event.reply("❌ Terjadi error saat memproses pesanan.")
+
+
+async def order_worker():
+    global current_checkout_user_id
+
+    while True:
+        event, sender, sender_id, selected_pakets = await order_queue.get()
+        try:
+            current_checkout_user_id = sender_id
+            await proses_order_otomatis_core(event, sender, sender_id, selected_pakets)
+        except Exception as error:
+            print(f"Error order_worker: {error}")
+            try:
+                await event.reply("❌ Terjadi error pada worker order.")
+            except Exception:
+                pass
+        finally:
+            current_checkout_user_id = None
+            queued_user_ids.discard(sender_id)
+            order_queue.task_done()
+
+
+async def enqueue_order(event, sender, sender_id, selected_pakets):
+    if sender_id in queued_user_ids:
+        await event.reply("⏳ Pesanan kamu sudah masuk antrian ya kak.")
+        return
+
+    queued_user_ids.add(sender_id)
+
+    queue_size_before = order_queue.qsize()
+    await order_queue.put((event, sender, sender_id, selected_pakets))
+
+    posisi = queue_size_before + 1
+    if current_checkout_user_id is not None:
+        posisi += 1
+
+    if posisi <= 1:
+        await event.reply("✅ Pesanan kamu masuk antrian dan akan segera diproses.")
+    else:
+        await event.reply(f"✅ Pesanan kamu masuk antrian.\nPosisi antrian saat ini: **{posisi}**")
 
 # ================== TIMEOUT CHECKER ==================
 async def check_expired_orders():
@@ -620,12 +781,10 @@ async def check_expired_orders():
 
                     try:
                         message_id = data.get("message_id")
-
                         if message_id:
                             await client.edit_message(int(user_id), message_id, expired_text)
                         else:
                             await client.send_message(int(user_id), expired_text)
-
                     except Exception as error:
                         print(f"Error edit/kirim expired ke {user_id}: {error}")
                         try:
@@ -756,18 +915,14 @@ async def stats_handler(event):
     total_history = await count_history()
     total_pending = await count_pending_confirmations()
 
-    settings_data = await get_settings()
-
-    active_user_text = str(active_payment_user_id) if active_payment_user_id else "-"
-
     await event.reply(
         f"📊 **STATISTIK BOT**\n\n"
         f"• Total user database: **{total_users}**\n"
         f"• User waiting payment: **{total_waiting}**\n"
         f"• Pending konfirmasi order: **{total_pending}**\n"
-        f"• Active payment user: **{active_user_text}**\n"
-        f"• Total history tersimpan: **{total_history}**\n"
-        f"• Kurs MYR: **{settings_data.get('kurs', 0)}**"
+        f"• User dalam antrian checkout: **{len(queued_user_ids)}**\n"
+        f"• Sedang checkout: **{current_checkout_user_id if current_checkout_user_id else '-'}**\n"
+        f"• Total history tersimpan: **{total_history}**"
     )
 
 # ================== COMMAND HISTORY ==================
@@ -863,7 +1018,7 @@ async def manual_order_handler(event):
     except Exception:
         sender = None
 
-    await proses_order_otomatis(event, sender, event.sender_id, selected_pakets)
+    await enqueue_order(event, sender, event.sender_id, selected_pakets)
 
 # ================== FIRST CHAT AUTO KIRIM HARGA ==================
 @client.on(events.NewMessage(incoming=True, func=lambda event: event.is_private))
@@ -920,7 +1075,6 @@ async def first_chat_send_harga_handler(event):
         await upsert_user(event.sender_id, payload)
 
         first_chat_skip_messages.add(event.id)
-
         print(f"✅ Auto harga terkirim sekali ke user {user_id}")
 
     except Exception as error:
@@ -949,8 +1103,6 @@ async def photo_handler(event):
 # ================== PRIVATE MESSAGE HANDLER ==================
 @client.on(events.NewMessage(incoming=True, func=lambda event: event.is_private and not bool(event.photo)))
 async def private_message_handler(event):
-    global active_payment_user_id
-
     if event.id in first_chat_skip_messages:
         first_chat_skip_messages.discard(event.id)
         return
@@ -966,8 +1118,9 @@ async def private_message_handler(event):
         sender = None
         sender_username = ""
 
+    # pesan dari bot payment
     if sender_username == PAYMENT_BOT.lower():
-        await forward_link_join(event)
+        await route_payment_bot_message(event)
         return
 
     text = normalize_text(event.message.text)
@@ -976,6 +1129,7 @@ async def private_message_handler(event):
     if not text:
         return
 
+    # keyword lihat harga
     if text == "harga":
         caption_text = await render_template(
             settings_data.get("text_harga", default_settings()["text_harga"]),
@@ -992,13 +1146,13 @@ async def private_message_handler(event):
         await event.reply(caption_text)
         return
 
+    # kalau sedang pending konfirmasi
     pending = await get_pending_confirmation(sender_id)
     if pending:
         if text == "ya":
             selected_pakets = pending.get("pakets", [])
             await delete_pending_confirmation(sender_id)
-            await event.reply("✅ Oke, pesanan sedang diproses...")
-            await proses_order_otomatis(event, sender, sender_id, selected_pakets)
+            await enqueue_order(event, sender, sender_id, selected_pakets)
             return
 
         if text == "tidak":
@@ -1014,6 +1168,7 @@ async def private_message_handler(event):
             await delete_pending_confirmation(sender_id)
             return
 
+    # cegah command owner masuk flow customer
     if text.startswith(".") or text.startswith("/"):
         return
 
@@ -1029,14 +1184,6 @@ async def private_message_handler(event):
 
     if not selected_pakets:
         print("DEBUG: tidak ada paket yang cocok")
-        return
-
-    # kalau ada sesi payment aktif milik orang lain, tahan dulu
-    if is_payment_session_busy() and active_payment_user_id != sender_id:
-        await event.reply(
-            "⏳ Saat ini sistem sedang menyelesaikan pembayaran customer lain.\n"
-            "Mohon tunggu sebentar lalu kirim ulang order ya kak."
-        )
         return
 
     nama_paket = ", ".join(selected_pakets)
@@ -1072,6 +1219,7 @@ async def private_message_handler(event):
 # ================== MAIN ==================
 async def main():
     timeout_task = None
+    worker_task = None
 
     while True:
         try:
@@ -1082,6 +1230,9 @@ async def main():
 
             if timeout_task is None or timeout_task.done():
                 timeout_task = asyncio.create_task(check_expired_orders())
+
+            if worker_task is None or worker_task.done():
+                worker_task = asyncio.create_task(order_worker())
 
             await client.run_until_disconnected()
 

@@ -936,7 +936,7 @@ async def private_message_handler(event):
         print("DEBUG: tidak ada paket yang cocok")
         return
 
-    await create_pending_confirmation(sender_id, selected_pakets, hours=5)
+    await create_pending_confirmation(sender_id, selected_pakets, minutes=2)
 
     nama_paket = ", ".join(selected_pakets)
     total_harga_idr = hitung_total_harga_idr(selected_pakets)
@@ -948,10 +948,14 @@ async def private_message_handler(event):
         extra_harga = f"\n\nEstimasi harga:\nRp{total_harga_idr:,}".replace(",", ".") + f"\nRM{total_harga_myr:.2f}"
 
     await event.reply(
-        f"Apakah benar ingin membeli:\n**{nama_paket}**"
-        f"{extra_harga}\n\n"
-        f"Balas: **ya** atau **tidak**\n"
-        f"Konfirmasi berlaku selama **5 jam**."
+        f"🛒 Konfirmasi Pesanan\n\n"
+        f"Halo kak, kamu memilih:\n
+        f"💰 Detail harga:\n"
+        f"{harga_idr_myr}\n\n"
+        f"Kalau sudah sesuai, balas:\n"
+        f"**ya** — untuk lanjut proses\n"
+        f"**tidak** — untuk batal\n\n"
+        f"⏳ Konfirmasi berlaku selama 5 jam."
     )
 
 

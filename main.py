@@ -1,6 +1,6 @@
 import asyncio
-import random
 import os
+import random
 import re
 from datetime import datetime, timedelta, timezone
 
@@ -16,20 +16,25 @@ API_ID_RAW = os.getenv("API_ID")
 API_HASH = os.getenv("API_HASH")
 SESSION_STRING = os.getenv("SESSION_STRING")
 PAYMENT_BOT = os.getenv("PAYMENT_BOT", "WarungLENDIR_Robot")
+
 MONGO_URI = os.getenv("MONGO_URI")
 MONGO_DB_NAME = os.getenv("MONGO_DB_NAME", "warung_lendir_bot")
 
+# timeout konfirmasi dalam menit
+# default 300 menit = 5 jam
+CONFIRM_TIMEOUT_MINUTES = int(os.getenv("CONFIRM_TIMEOUT_MINUTES", "300"))
+
 if not API_ID_RAW:
-    raise ValueError("API_ID di file .env belum diisi")
+    raise ValueError("API_ID belum diisi di environment")
 
 if not API_HASH:
-    raise ValueError("API_HASH di file .env belum diisi")
+    raise ValueError("API_HASH belum diisi di environment")
 
 if not SESSION_STRING:
-    raise ValueError("SESSION_STRING di file .env belum diisi")
+    raise ValueError("SESSION_STRING belum diisi di environment")
 
 if not MONGO_URI:
-    raise ValueError("MONGO_URI di file .env belum diisi")
+    raise ValueError("MONGO_URI belum diisi di environment")
 
 API_ID = int(API_ID_RAW.strip())
 API_HASH = API_HASH.strip()
@@ -51,15 +56,13 @@ pending_col = db["pending_confirmations"]
 # ================== FILES ==================
 HARGA_IMAGE_FILE = "harga_list.jpg"
 
-# ================== STATE MANAGEMENT ==================
-# contoh:
-# user_states[user_id] = {
-#   "status": "waiting_payment",
-#   "selected_pakets": [...],
-#   "total_harga_idr": 100000
-# }
+# ================== RUNTIME STATE ==================
+# dipakai untuk flow aktif dalam memori
 user_states = {}
 user_last_event = {}
+
+# untuk mencegah first chat diproses dua kali di message yang sama
+first_chat_skip_messages = set()
 
 # ================== DELAY ==================
 DELAYS = {
@@ -87,7 +90,6 @@ PAKET_MAPPING = {
 }
 
 # ================== HARGA PAKET ==================
-# Sesuai daftar yang kamu kirim
 PAKET_PRICES = {
     "VVIP SUPER INDO": 150000,
     "VVIP SUPER MALAY": 100000,
@@ -100,8 +102,82 @@ PAKET_PRICES = {
     "BARATT": 45000,
     "ONLY FANS": 50000,
     "SMP / SMA PREMIUM": 60000,
-    "Payment": 1000
+    "Payment": 100000
 }
+
+# ================== UTIL ==================
+def now_utc():
+    return datetime.now(timezone.utc)
+
+
+def normalize_text(text: str) -> str:
+    return (text or "").strip().lower()
+
+
+def match_kata(text: str, keyword: str) -> bool:
+    return re.search(rf"\b{re.escape(keyword.lower())}\b", text.lower()) is not None
+
+
+def format_rupiah(nominal: int) -> str:
+    return f"Rp{nominal:,}".replace(",", ".")
+
+
+def format_timeout_text(total_minutes: int) -> str:
+    if total_minutes % 60 == 0:
+        hours = total_minutes // 60
+        return f"{hours} jam"
+    return f"{total_minutes} menit"
+
+
+def hitung_total_harga_idr(selected_pakets: list[str]) -> int:
+    total = 0
+    for paket in selected_pakets:
+        total += PAKET_PRICES.get(paket, 0)
+    return total
+
+
+def parse_requested_packages(raw_input: str):
+    requested_items = [item.strip() for item in raw_input.split(",") if item.strip()]
+    selected_pakets = []
+
+    for requested in requested_items:
+        matched = None
+
+        for package_name, keywords in PAKET_MAPPING.items():
+            if requested == package_name.lower() or any(requested == key.lower() for key in keywords):
+                matched = package_name
+                break
+
+        if not matched:
+            for package_name, keywords in PAKET_MAPPING.items():
+                if any(match_kata(requested, key) for key in keywords):
+                    matched = package_name
+                    break
+
+        if not matched:
+            return None, requested
+
+        if matched not in selected_pakets:
+            selected_pakets.append(matched)
+
+    return selected_pakets, None
+
+
+async def render_template(text: str, event) -> str:
+    try:
+        sender = await event.get_sender()
+    except Exception:
+        sender = None
+
+    user_id = str(event.sender_id or "")
+    first_name = getattr(sender, "first_name", None) or "Kak"
+    mention = f"[{first_name}](tg://user?id={user_id})"
+
+    return (
+        text.replace("{mention}", mention)
+        .replace("{name}", first_name)
+        .replace("{id}", user_id)
+    )
 
 # ================== SETTINGS ==================
 def default_settings():
@@ -141,11 +217,7 @@ async def get_settings():
     data = await settings_col.find_one({"_id": "main"})
     if not data:
         defaults = default_settings()
-        await settings_col.update_one(
-            {"_id": "main"},
-            {"$set": defaults},
-            upsert=True
-        )
+        await settings_col.update_one({"_id": "main"}, {"$set": defaults}, upsert=True)
         return defaults
 
     result = default_settings()
@@ -156,12 +228,7 @@ async def get_settings():
 
 
 async def save_settings(settings_data):
-    await settings_col.update_one(
-        {"_id": "main"},
-        {"$set": settings_data},
-        upsert=True
-    )
-
+    await settings_col.update_one({"_id": "main"}, {"$set": settings_data}, upsert=True)
 
 # ================== USERS ==================
 async def get_user(user_id: int):
@@ -169,11 +236,7 @@ async def get_user(user_id: int):
 
 
 async def upsert_user(user_id: int, user_data: dict):
-    await users_col.update_one(
-        {"_id": str(user_id)},
-        {"$set": user_data},
-        upsert=True
-    )
+    await users_col.update_one({"_id": str(user_id)}, {"$set": user_data}, upsert=True)
 
 
 async def count_users():
@@ -201,7 +264,7 @@ async def add_user_to_db(event):
 
     user_id = str(event.sender_id)
     old_data = await users_col.find_one({"_id": user_id})
-    now = datetime.now(timezone.utc)
+    now = now_utc()
 
     payload = {
         "_id": user_id,
@@ -213,13 +276,13 @@ async def add_user_to_db(event):
         "last_seen": now,
         "auto_harga_sent": old_data.get("auto_harga_sent", False) if old_data else False
     }
-    await users_col.update_one({"_id": user_id}, {"$set": payload}, upsert=True)
 
+    await users_col.update_one({"_id": user_id}, {"$set": payload}, upsert=True)
 
 # ================== HISTORY ==================
 async def save_history(user_id, username, paket_list):
     await history_col.insert_one({
-        "timestamp": datetime.now(timezone.utc),
+        "timestamp": now_utc(),
         "user_id": user_id,
         "username": username or "Unknown",
         "paket": paket_list,
@@ -239,11 +302,10 @@ async def count_history():
 async def clear_history():
     await history_col.delete_many({})
 
-
 # ================== PENDING CONFIRMATIONS ==================
-async def create_pending_confirmation(user_id: int, paket_list: list[str], hours: int = 5):
-    now = datetime.now(timezone.utc)
-    expired_at = now + timedelta(hours=hours)
+async def create_pending_confirmation(user_id: int, paket_list: list[str]):
+    now = now_utc()
+    expired_at = now + timedelta(minutes=CONFIRM_TIMEOUT_MINUTES)
 
     await pending_col.update_one(
         {"_id": str(user_id)},
@@ -270,68 +332,7 @@ async def delete_pending_confirmation(user_id: int):
 async def count_pending_confirmations():
     return await pending_col.count_documents({})
 
-
-# ================== UTIL ==================
-def match_kata(text, keyword):
-    return re.search(rf"\b{re.escape(keyword.lower())}\b", text.lower()) is not None
-
-
-def normalize_text(text):
-    return (text or "").strip().lower()
-
-
-async def render_template(text, event):
-    try:
-        sender = await event.get_sender()
-    except Exception:
-        sender = None
-
-    user_id = str(event.sender_id or "")
-    first_name = getattr(sender, "first_name", None) or "Kak"
-    mention = f"[{first_name}](tg://user?id={user_id})"
-
-    return (
-        text.replace("{mention}", mention)
-        .replace("{name}", first_name)
-        .replace("{id}", user_id)
-    )
-
-
-def parse_requested_packages(raw_input):
-    requested_items = [item.strip() for item in raw_input.split(",") if item.strip()]
-    selected_pakets = []
-
-    for requested in requested_items:
-        matched = None
-
-        for package_name, keywords in PAKET_MAPPING.items():
-            if requested == package_name.lower() or any(requested == key.lower() for key in keywords):
-                matched = package_name
-                break
-
-        if not matched:
-            for package_name, keywords in PAKET_MAPPING.items():
-                if any(match_kata(requested, key) for key in keywords):
-                    matched = package_name
-                    break
-
-        if not matched:
-            return None, requested
-
-        if matched not in selected_pakets:
-            selected_pakets.append(matched)
-
-    return selected_pakets, None
-
-
-def hitung_total_harga_idr(selected_pakets):
-    total = 0
-    for paket in selected_pakets:
-        total += PAKET_PRICES.get(paket, 0)
-    return total
-
-
-# ================== MULAI FLOW PAYMENT ==================
+# ================== PAYMENT FLOW ==================
 async def mulai_flow_payment():
     try:
         print("🚀 Mengirim /start ke bot payment...")
@@ -343,7 +344,6 @@ async def mulai_flow_payment():
         return False
 
 
-# ================== KLIK TOMBOL ==================
 async def klik_tombol(chat, teks):
     print(f"🔍 Mencari tombol: '{teks}'")
     for attempt in range(1, 20):
@@ -372,7 +372,6 @@ async def klik_tombol(chat, teks):
     return False
 
 
-# ================== SMART QRIS FORWARD ==================
 async def smart_forward_qris(event, user_id):
     settings_data = await get_settings()
 
@@ -417,7 +416,6 @@ async def smart_forward_qris(event, user_id):
     return False
 
 
-# ================== FORWARD BUKTI & LINK ==================
 async def forward_bukti_transfer(event):
     settings_data = await get_settings()
 
@@ -466,7 +464,6 @@ async def forward_link_join(event):
                 print(f"Error forward link join: {error}")
 
 
-# ================== PROSES ORDER ==================
 async def proses_order_otomatis(event, sender, sender_id, selected_pakets):
     total_selected = len(selected_pakets)
     is_paket_hemat = total_selected >= 2
@@ -523,13 +520,11 @@ async def proses_order_otomatis(event, sender, sender_id, selected_pakets):
         print(f"❌ Error proses: {error}")
         await event.reply("❌ Terjadi error saat memproses pesanan.")
 
-
-# ================== AUTO TIMEOUT KONFIRMASI ==================
+# ================== TIMEOUT CHECKER ==================
 async def check_expired_orders():
     while True:
         try:
-            now = datetime.now(timezone.utc)
-
+            now = now_utc()
             cursor = pending_col.find({})
             all_pending = await cursor.to_list(length=None)
 
@@ -544,7 +539,7 @@ async def check_expired_orders():
                     try:
                         await client.send_message(
                             int(user_id),
-                            "❌ Konfirmasi pesanan sudah kadaluarsa karena tidak ada respon dalam 5 jam.\nSilakan order ulang ya kak."
+                            f"❌ Konfirmasi pesanan sudah kadaluarsa karena tidak ada respon dalam {format_timeout_text(CONFIRM_TIMEOUT_MINUTES)}.\nSilakan order ulang ya kak."
                         )
                     except Exception as error:
                         print(f"Error kirim expired ke {user_id}: {error}")
@@ -555,7 +550,6 @@ async def check_expired_orders():
             print(f"Error check_expired_orders: {error}")
 
         await asyncio.sleep(60)
-
 
 # ================== COMMAND HELP ==================
 @client.on(events.NewMessage(pattern=r"(?i)^[./]help$"))
@@ -578,10 +572,9 @@ async def help_handler(event):
         "• `.order [nama paket]` - Fallback manual order\n\n"
         "**Keyword customer:** `harga`\n"
         "**Konfirmasi order customer:** `ya` / `tidak`\n"
-        "**Timeout konfirmasi:** 5 jam\n"
+        f"**Timeout konfirmasi:** {format_timeout_text(CONFIRM_TIMEOUT_MINUTES)}\n"
         "**Variabel:** `{mention}`, `{name}`, `{id}`"
     )
-
 
 # ================== COMMAND SETTINGS ==================
 @client.on(events.NewMessage(pattern=r"(?i)^[.]setkurs\s+([\d\.]+)$"))
@@ -663,7 +656,6 @@ async def setharga_handler(event):
         print(f"Error simpan foto harga: {error}")
         await event.reply("❌ Gagal menyimpan foto list harga.")
 
-
 # ================== COMMAND STATS ==================
 @client.on(events.NewMessage(pattern=r"(?i)^[.]stats$"))
 async def stats_handler(event):
@@ -686,7 +678,6 @@ async def stats_handler(event):
         f"• Kurs MYR: **{settings_data.get('kurs', 0)}**"
     )
 
-
 # ================== COMMAND HISTORY ==================
 @client.on(events.NewMessage(pattern=r"(?i)^[.]history$"))
 async def history_handler(event):
@@ -706,7 +697,6 @@ async def history_handler(event):
 
     await event.reply(message_text)
 
-
 # ================== COMMAND CLEAR DB ==================
 @client.on(events.NewMessage(pattern=r"(?i)^[.]cleardb$"))
 async def cleardb_handler(event):
@@ -715,7 +705,6 @@ async def cleardb_handler(event):
 
     await clear_history()
     await event.reply("✅ Database riwayat berhasil dibersihkan.")
-
 
 # ================== COMMAND BROADCAST ==================
 @client.on(events.NewMessage(pattern=r"(?i)^[.]broadcast$"))
@@ -760,7 +749,6 @@ async def broadcast_handler(event):
         f"• Gagal: **{failed_count}**"
     )
 
-
 # ================== COMMAND ORDER MANUAL FALLBACK ==================
 @client.on(events.NewMessage(pattern=r"(?is)^[.]order\s+(.+)$"))
 async def manual_order_handler(event):
@@ -785,7 +773,6 @@ async def manual_order_handler(event):
 
     await proses_order_otomatis(event, sender, event.sender_id, selected_pakets)
 
-
 # ================== FIRST CHAT AUTO KIRIM HARGA ==================
 @client.on(events.NewMessage(incoming=True, func=lambda event: event.is_private))
 async def first_chat_send_harga_handler(event):
@@ -807,7 +794,7 @@ async def first_chat_send_harga_handler(event):
         return
 
     user_id = str(event.sender_id)
-    now = datetime.now(timezone.utc)
+    now = now_utc()
     old_data = await get_user(event.sender_id)
 
     payload = {
@@ -839,15 +826,22 @@ async def first_chat_send_harga_handler(event):
         payload["auto_harga_sent"] = True
         payload["last_seen"] = now
         await upsert_user(event.sender_id, payload)
+
+        # tandai supaya message ini tidak diproses lagi di handler bawah
+        first_chat_skip_messages.add(event.id)
+
         print(f"✅ Auto harga terkirim sekali ke user {user_id}")
 
     except Exception as error:
         print(f"Error kirim harga first chat: {error}")
 
-
 # ================== PRIVATE PHOTO HANDLER ==================
 @client.on(events.NewMessage(incoming=True, func=lambda event: event.is_private and bool(event.photo)))
 async def photo_handler(event):
+    if event.id in first_chat_skip_messages:
+        first_chat_skip_messages.discard(event.id)
+        return
+
     await add_user_to_db(event)
 
     try:
@@ -861,10 +855,13 @@ async def photo_handler(event):
 
     await forward_bukti_transfer(event)
 
-
 # ================== PRIVATE MESSAGE HANDLER ==================
 @client.on(events.NewMessage(incoming=True, func=lambda event: event.is_private and not bool(event.photo)))
 async def private_message_handler(event):
+    if event.id in first_chat_skip_messages:
+        first_chat_skip_messages.discard(event.id)
+        return
+
     settings_data = await get_settings()
 
     await add_user_to_db(event)
@@ -876,6 +873,7 @@ async def private_message_handler(event):
         sender = None
         sender_username = ""
 
+    # pesan dari payment bot
     if sender_username == PAYMENT_BOT.lower():
         await forward_link_join(event)
         return
@@ -886,7 +884,7 @@ async def private_message_handler(event):
     if not text:
         return
 
-    # ================== KEYWORD MANUAL HARGA ==================
+    # keyword lihat harga manual
     if text == "harga":
         caption_text = await render_template(
             settings_data.get("text_harga", default_settings()["text_harga"]),
@@ -903,7 +901,7 @@ async def private_message_handler(event):
         await event.reply(caption_text)
         return
 
-    # ================== KONFIRMASI YA / TIDAK ==================
+    # kalau sedang pending konfirmasi
     pending = await get_pending_confirmation(sender_id)
     if pending:
         if text == "ya":
@@ -918,7 +916,7 @@ async def private_message_handler(event):
             await event.reply("❌ Oke, pesanan dibatalkan.")
             return
 
-    # cegah command owner masuk ke flow order
+    # cegah command owner masuk flow customer
     if text.startswith(".") or text.startswith("/"):
         return
 
@@ -936,43 +934,44 @@ async def private_message_handler(event):
         print("DEBUG: tidak ada paket yang cocok")
         return
 
-    await create_pending_confirmation(sender_id, selected_pakets, minutes=2)
+    await create_pending_confirmation(sender_id, selected_pakets)
 
     nama_paket = ", ".join(selected_pakets)
-total_harga_idr = hitung_total_harga_idr(selected_pakets)
-kurs = settings_data.get("kurs", 0)
+    total_harga_idr = hitung_total_harga_idr(selected_pakets)
+    kurs = settings_data.get("kurs", 0)
 
-extra_harga = ""
-
-if kurs > 0 and total_harga_idr > 0:
-    total_harga_myr = total_harga_idr / kurs
-    rupiah_text = f"Rp{total_harga_idr:,}".replace(",", ".")
-    extra_harga = f"💰 Detail harga:\n{rupiah_text}\nRM{total_harga_myr:.2f}"
-
-# Cek apakah extra_harga ada, jika ada, tambahkan newline
-if extra_harga:
-    extra_harga = f"{extra_harga}\n\n"
-else:
     extra_harga = ""
 
-konfirmasi_text = (
-    "🛒 Konfirmasi Pesanan\n\n"
-    f"Halo kak, kamu memilih:\n"
-    f"**{nama_paket}**\n\n"
-    f"{extra_harga}"
-    "Kalau sudah sesuai, balas:\n"
-    "**ya** — untuk lanjut proses\n"
-    "**tidak** — untuk batal\n\n"
-    "⏳ Konfirmasi berlaku selama 5 jam."
-)
+    if kurs > 0 and total_harga_idr > 0:
+        total_harga_myr = total_harga_idr / kurs
+        rupiah_text = format_rupiah(total_harga_idr)
+        extra_harga = f"💰 Detail harga:\n{rupiah_text}\nRM{total_harga_myr:.2f}"
 
-await event.reply(konfirmasi_text)
-# ================== AUTO RECONNECT ==================
+    if extra_harga:
+        extra_harga = f"{extra_harga}\n\n"
+    else:
+        extra_harga = ""
+
+    konfirmasi_text = (
+        "🛒 Konfirmasi Pesanan\n\n"
+        f"Halo kak, kamu memilih:\n"
+        f"**{nama_paket}**\n\n"
+        f"{extra_harga}"
+        "Kalau sudah sesuai, balas:\n"
+        "**ya** — untuk lanjut proses\n"
+        "**tidak** — untuk batal\n\n"
+        f"⏳ Konfirmasi berlaku selama {format_timeout_text(CONFIRM_TIMEOUT_MINUTES)}."
+    )
+
+    await event.reply(konfirmasi_text)
+
+# ================== MAIN ==================
 async def main():
     timeout_task = None
 
     while True:
         try:
+            print("🚀 WARUNG LENDIR ASSISTANT sedang berjalan...")
             print("🚀 Menghubungkan ke Telegram...")
             await client.start()
             print("✅ Bot berhasil terhubung ke Telegram!")
@@ -993,5 +992,4 @@ async def main():
 
 
 if __name__ == "__main__":
-    print("🚀 WARUNG LENDIR ASSISTANT sedang berjalan...")
     asyncio.run(main())

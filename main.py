@@ -68,7 +68,6 @@ current_checkout_user_id = None
 
 # ================== DELAY ==================
 DELAYS = {
-    DELAYS = {
     "START": 1.0,
     "MENU_AWAL": 0.4,
     "PAKET": 0.3,

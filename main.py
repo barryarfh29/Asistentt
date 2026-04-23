@@ -52,6 +52,12 @@ pending_col = db["pending_confirmations"]
 HARGA_IMAGE_FILE = "harga_list.jpg"
 
 # ================== STATE MANAGEMENT ==================
+# contoh:
+# user_states[user_id] = {
+#   "status": "waiting_payment",
+#   "selected_pakets": [...],
+#   "total_harga_idr": 100000
+# }
 user_states = {}
 user_last_event = {}
 
@@ -67,19 +73,35 @@ DELAYS = {
 # ================== PAKET MAPPING ==================
 PAKET_MAPPING = {
     "VVIP SUPER INDO": ["vvip super indo", "super indo"],
+    "VVIP SUPER MALAY": ["vvip super malay", "super malay", "malay"],
     "HIJAB PREMIUM": ["hijab premium", "hijab"],
-    "ASIAN DAIRY": ["asian dairy", "dairy"],
     "INDO PREMIUM": ["indo premium"],
+    "ASIAN DAIRY": ["asian dairy", "dairy"],
     "CAMPURAN PREMIUM": ["campuran premium", "campuran", "campur"],
     "ASIAN PREMIUM": ["asian premium", "asian"],
     "LIVE RECORD": ["live record", "live"],
     "BARATT": ["baratt", "barat"],
     "ONLY FANS": ["only fans", "onlyfans"],
     "SMP / SMA PREMIUM": ["smp", "sma"],
-    "VVIP SUPER MALAY": ["vvip super malay", "super malay", "malay"],
     "Payment": ["payment"]
 }
 
+# ================== HARGA PAKET ==================
+# Sesuai daftar yang kamu kirim
+PAKET_PRICES = {
+    "VVIP SUPER INDO": 150000,
+    "VVIP SUPER MALAY": 100000,
+    "HIJAB PREMIUM": 60000,
+    "INDO PREMIUM": 50000,
+    "ASIAN DAIRY": 45000,
+    "CAMPURAN PREMIUM": 50000,
+    "ASIAN PREMIUM": 60000,
+    "LIVE RECORD": 50000,
+    "BARATT": 45000,
+    "ONLY FANS": 50000,
+    "SMP / SMA PREMIUM": 60000,
+    "Payment": 1000
+}
 
 # ================== SETTINGS ==================
 def default_settings():
@@ -88,7 +110,30 @@ def default_settings():
         "bayar_text": "✅ QRIS sudah dikirim ya {mention}\nSilakan lanjut pembayaran.",
         "verif_text": "✅ Bukti pembayaran sudah kami terima, mohon tunggu verifikasi ya {mention}",
         "thanks_text": "✅ Terima kasih {mention}, pembayaran berhasil diproses.",
-        "text_harga": "📂 **LIST HARGA TERBARU**\nSilakan cek list di bawah ya kak."
+        "text_harga": (
+            "Halo! {id} Selamat Datang ya\n"
+            "Iya kak, mau join VIP ya? 👋\n\n"
+            "Pesan ini adalah SISTEM OTOMATIS. Mohon ikuti langkah di bawah ini agar orderan Kakak bisa langsung diproses\n\n"
+            "● VVIP SUPER INDO ➔ 150K IDR / RM42\n"
+            "● VVIP SUPER MALAY ➔ 100K IDR / RM28\n"
+            "● HIJAB PREMIUM ➔ 60K IDR / RM17\n"
+            "● INDO PREMIUM ➔ 50K IDR / RM14\n"
+            "● ASIAN DAIRY ➔ 45K IDR / RM12\n"
+            "● CAMPURAN PREMIUM ➔ 50K IDR / RM14\n"
+            "● ASIAN PREMIUM ➔ 60K IDR / RM17\n"
+            "● LIVE RECORD ➔ 50K IDR / RM14\n"
+            "● BARATT ➔ 45K IDR / RM12\n"
+            "● ONLY FANS ➔ 50K IDR / RM14\n"
+            "● SMP / SMA PREMIUM ➔ 60K IDR / RM17\n\n"
+            "FORMAT ORDER (Silakan Balas Sekarang):\n\n"
+            "BELI 1 PAKET\n"
+            "Nama Paket: (Contoh: VVIP SUPER INDO)\n\n"
+            "BELI 2+ PAKET ⬇️\n"
+            " VVIP SUPER INDO \n"
+            " VVIP SUPER MALAY \n\n"
+            "Metode Pembayaran: QRIS\n\n"
+            "Admin akan segera mengirimkan detail pembayaran.Mohon segera kirim format order ya! 🚀"
+        )
     }
 
 
@@ -279,6 +324,13 @@ def parse_requested_packages(raw_input):
     return selected_pakets, None
 
 
+def hitung_total_harga_idr(selected_pakets):
+    total = 0
+    for paket in selected_pakets:
+        total += PAKET_PRICES.get(paket, 0)
+    return total
+
+
 # ================== MULAI FLOW PAYMENT ==================
 async def mulai_flow_payment():
     try:
@@ -341,12 +393,18 @@ async def smart_forward_qris(event, user_id):
                     )
 
                     kurs = settings_data.get("kurs", 0)
-                    bayar_text += f"\n\n💱 Estimasi kurs:\n1 MYR ≈ {kurs} IDR"
+                    state = user_states.get(user_id, {})
+                    total_harga_idr = state.get("total_harga_idr", 0)
+
+                    if kurs > 0 and total_harga_idr > 0:
+                        total_harga_myr = total_harga_idr / kurs
+                        bayar_text += f"\n\n💱 Estimasi harga:\nRM{total_harga_myr:.2f}"
 
                     await event.reply(bayar_text)
-                    
 
-                    user_states[user_id] = "waiting_payment"
+                    existing = user_states.get(user_id, {})
+                    existing["status"] = "waiting_payment"
+                    user_states[user_id] = existing
                     user_last_event[user_id] = event
                     print("✅ QRIS berhasil diforward!")
                     return True
@@ -364,7 +422,8 @@ async def forward_bukti_transfer(event):
     settings_data = await get_settings()
 
     user_id = event.sender_id
-    if user_states.get(user_id) != "waiting_payment":
+    state = user_states.get(user_id, {})
+    if state.get("status") != "waiting_payment":
         return
 
     try:
@@ -388,7 +447,8 @@ async def forward_link_join(event):
         return
 
     for user_id in list(user_states.keys()):
-        if user_states.get(user_id) == "waiting_payment" and user_id in user_last_event:
+        state = user_states.get(user_id, {})
+        if state.get("status") == "waiting_payment" and user_id in user_last_event:
             try:
                 target_event = user_last_event[user_id]
                 await event.forward_to(target_event.chat_id)
@@ -411,6 +471,13 @@ async def proses_order_otomatis(event, sender, sender_id, selected_pakets):
     total_selected = len(selected_pakets)
     is_paket_hemat = total_selected >= 2
     menu_awal = "Paket Hemat" if is_paket_hemat else "VIP SATUAN"
+    total_harga_idr = hitung_total_harga_idr(selected_pakets)
+
+    user_states[sender_id] = {
+        "status": "processing_order",
+        "selected_pakets": selected_pakets,
+        "total_harga_idr": total_harga_idr
+    }
 
     print("DEBUG MENU AWAL:", menu_awal)
 
@@ -523,12 +590,12 @@ async def setkurs_handler(event):
         return
 
     settings_data = await get_settings()
-    
     kurs_input = event.pattern_match.group(1).replace(".", "")
     settings_data["kurs"] = int(kurs_input)
-    
     await save_settings(settings_data)
-    await event.reply(f"✅ Kurs MYR berhasil diatur ke: **{settings_data['kurs']}**")
+
+    tampil = f"{settings_data['kurs']:,}".replace(",", ".")
+    await event.reply(f"✅ Kurs MYR berhasil diatur ke: **{tampil}**")
 
 
 @client.on(events.NewMessage(pattern=r"(?is)^[.]setbayar\s+(.+)$"))
@@ -604,7 +671,7 @@ async def stats_handler(event):
         return
 
     total_users = await count_users()
-    total_waiting = sum(1 for state in user_states.values() if state == "waiting_payment")
+    total_waiting = sum(1 for state in user_states.values() if state.get("status") == "waiting_payment")
     total_history = await count_history()
     total_pending = await count_pending_confirmations()
 
@@ -872,8 +939,17 @@ async def private_message_handler(event):
     await create_pending_confirmation(sender_id, selected_pakets, hours=5)
 
     nama_paket = ", ".join(selected_pakets)
+    total_harga_idr = hitung_total_harga_idr(selected_pakets)
+    kurs = settings_data.get("kurs", 0)
+
+    extra_harga = ""
+    if kurs > 0 and total_harga_idr > 0:
+        total_harga_myr = total_harga_idr / kurs
+        extra_harga = f"\n\nEstimasi harga:\nRp{total_harga_idr:,}".replace(",", ".") + f"\nRM{total_harga_myr:.2f}"
+
     await event.reply(
-        f"Apakah benar ingin membeli:\n**{nama_paket}**\n\n"
+        f"Apakah benar ingin membeli:\n**{nama_paket}**"
+        f"{extra_harga}\n\n"
         f"Balas: **ya** atau **tidak**\n"
         f"Konfirmasi berlaku selama **5 jam**."
     )

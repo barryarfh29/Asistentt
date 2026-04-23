@@ -1198,25 +1198,25 @@ async def private_message_handler(event):
         return
 
     pending = await get_pending_confirmation(sender_id)
-    if pending:
-        if text == "ya":
-            selected_pakets = pending.get("pakets", [])
-            await delete_pending_confirmation(sender_id)
-            await enqueue_order(event, sender, sender_id, selected_pakets)
-            return
+if pending:
+    if text in ["ya", "y", "iya", "lanjut", "ok", "oke"]:
+        selected_pakets = pending.get("pakets", [])
+        await delete_pending_confirmation(sender_id)
+        await enqueue_order(event, sender, sender_id, selected_pakets)
+        return
 
-        if text == "tidak":
-            try:
-                message_id = pending.get("message_id")
-                if message_id:
-                    await client.edit_message(sender_id, message_id, "❌ Pesanan dibatalkan.")
-                else:
-                    await event.reply("❌ Pesanan dibatalkan.")
-            except Exception:
+    if text in ["tidak", "batal", "cancel", "gak jadi", "ga jadi", "enggak", "nggak", "no"]:
+        try:
+            message_id = pending.get("message_id")
+            if message_id:
+                await client.edit_message(sender_id, message_id, "❌ Pesanan dibatalkan.")
+            else:
                 await event.reply("❌ Pesanan dibatalkan.")
+        except Exception:
+            await event.reply("❌ Pesanan dibatalkan.")
 
-            await delete_pending_confirmation(sender_id)
-            return
+        await delete_pending_confirmation(sender_id)
+        return
 
     if text.startswith(".") or text.startswith("/"):
         return

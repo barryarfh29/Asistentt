@@ -303,7 +303,7 @@ async def clear_history():
     await history_col.delete_many({})
 
 # ================== PENDING CONFIRMATIONS ==================
-async def create_pending_confirmation(user_id: int, paket_list: list[str]):
+async def create_pending_confirmation(user_id: int, paket_list: list[str], message_id: int | None = None):
     now = now_utc()
     expired_at = now + timedelta(minutes=CONFIRM_TIMEOUT_MINUTES)
 
@@ -314,7 +314,8 @@ async def create_pending_confirmation(user_id: int, paket_list: list[str]):
                 "user_id": user_id,
                 "pakets": paket_list,
                 "created_at": now,
-                "expired_at": expired_at
+                "expired_at": expired_at,
+                "message_id": message_id
             }
         },
         upsert=True

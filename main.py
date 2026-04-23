@@ -523,7 +523,10 @@ async def setkurs_handler(event):
         return
 
     settings_data = await get_settings()
-    settings_data["kurs"] = int(event.pattern_match.group(1))
+    
+    kurs_input = event.pattern_match.group(1).replace(".", "")
+    settings_data["kurs"] = int(kurs_input)
+    
     await save_settings(settings_data)
     await event.reply(f"✅ Kurs MYR berhasil diatur ke: **{settings_data['kurs']}**")
 

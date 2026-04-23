@@ -563,7 +563,7 @@ async def smart_forward_qris(event, user_id, min_message_id=0):
         except Exception as error:
             print(f"Error cek QRIS: {error}")
 
-        await asyncio.sleep(2.5)
+        await asyncio.sleep(1.0)
 
     await event.reply("✅ Proses selesai. Silakan cek QRIS di bot pembayaran.")
     return False

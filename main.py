@@ -939,24 +939,29 @@ async def private_message_handler(event):
     await create_pending_confirmation(sender_id, selected_pakets, minutes=2)
 
     nama_paket = ", ".join(selected_pakets)
-    total_harga_idr = hitung_total_harga_idr(selected_pakets)
-    kurs = settings_data.get("kurs", 0)
+total_harga_idr = hitung_total_harga_idr(selected_pakets)
+kurs = settings_data.get("kurs", 0)
 
-    extra_harga = ""
-    if kurs > 0 and total_harga_idr > 0:
-        total_harga_myr = total_harga_idr / kurs
-        extra_harga = f"\n\nEstimasi harga:\nRp{total_harga_idr:,}".replace(",", ".") + f"\nRM{total_harga_myr:.2f}"
+extra_harga = ""
 
-    await event.reply(
-        f"🛒 Konfirmasi Pesanan\n\n"
-        f"Halo kak, kamu memilih:\n
-        f"💰 Detail harga:\n"
-        f"{harga_idr_myr}\n\n"
-        f"Kalau sudah sesuai, balas:\n"
-        f"**ya** — untuk lanjut proses\n"
-        f"**tidak** — untuk batal\n\n"
-        f"⏳ Konfirmasi berlaku selama 5 jam."
-    )
+if kurs > 0 and total_harga_idr > 0:
+    total_harga_myr = total_harga_idr / kurs
+    extra_harga = f"\n\nEstimasi harga:\nRp{total_harga_idr:,}".replace(",", ".") + f"\nRM{total_harga_myr:.2f}"
+
+await event.reply(f"""🛒 Konfirmasi Pesanan
+
+Halo kak, kamu memilih:
+**{nama_paket}**
+
+{extra_harga}
+
+Kalau sudah sesuai, balas:
+**ya** — untuk lanjut proses
+**tidak** — untuk batal
+
+⏳ Konfirmasi berlaku selama 5 jam.
+""")
+)
 
 
 # ================== AUTO RECONNECT ==================

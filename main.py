@@ -482,10 +482,10 @@ async def klik_tombol(chat, teks):
                             await asyncio.sleep(random.uniform(0.2, 0.5))
                             print(f"✅ KLIK → {button.text} (Attempt {attempt})")
                             await msg.click(row_index, col_index)
-                            await asyncio.sleep(2.2)
+                            await asyncio.sleep(0.8)
                             return True
 
-            await asyncio.sleep(1.8)
+            await asyncio.sleep(0.6)
         except Exception as error:
             print(f"Error klik '{teks}': {error}")
             await asyncio.sleep(1.6)

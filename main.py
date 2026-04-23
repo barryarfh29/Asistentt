@@ -216,7 +216,18 @@ def extract_payment_expiry(text: str) -> str | None:
 
 def is_join_message(text: str) -> bool:
     text_lower = normalize_text(text)
-    return ("join payment" in text_lower) or ("t.me/" in text_lower)
+
+    keywords = [
+        "join payment",
+        "please click the following link",
+        "following link",
+        "https://t.me/",
+        "http://t.me/",
+        "t.me/+",
+        "t.me/"
+    ]
+
+    return any(keyword in text_lower for keyword in keywords)
 
 
 def is_qris_message(msg) -> bool:
